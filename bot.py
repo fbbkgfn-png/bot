@@ -17,6 +17,8 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
 logging.basicConfig(level=logging.INFO)
 
@@ -404,10 +406,58 @@ async def fallback(message: Message):
     )
 
 
-async def main():
-    await dp.start_polling(bot)
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram/webhook")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+# Render normally provides PORT automatically.
+PORT = int(os.getenv("PORT", "10000"))
+
+if RENDER_EXTERNAL_URL:
+    WEBHOOK_URL = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+else:
+    WEBHOOK_URL = ""
+
+
+async def on_startup(app: web.Application):
+    if not WEBHOOK_URL:
+        raise RuntimeError(
+            "Set RENDER_EXTERNAL_URL in Render, for example "
+            "https://your-service.onrender.com"
+        )
+
+    await bot.set_webhook(
+        url=WEBHOOK_URL,
+        allowed_updates=dp.resolve_used_update_types(),
+    )
+    logging.info("Telegram webhook set: %s", WEBHOOK_URL)
+
+
+async def on_shutdown(app: web.Application):
+    await bot.delete_webhook(drop_pending_updates=False)
+    await bot.session.close()
+
+
+def create_app():
+    app = web.Application()
+
+    # Telegram sends updates to this endpoint.
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+    ).register(app, path=WEBHOOK_PATH)
+
+    # Connect aiogram's dispatcher lifecycle to aiohttp.
+    setup_application(app, dp, bot=bot)
+
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_shutdown)
+
+    return app
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    web.run_app(
+        create_app(),
+        host="0.0.0.0",
+        port=PORT,
+    )
